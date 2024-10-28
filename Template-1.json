@@ -1,0 +1,366 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "CloudFormation template for Grafana Pipeline",
+    "Parameters": {
+        "VpcSecurityGroupId": {
+            "Type": "String"  
+        },
+        "SubnetIds": {
+            "Type": "List<String>"
+        },
+        "CodeS3Bucket": {
+            "Type": "String"
+        },
+        "FirstLambdaS3Key": {
+            "Type": "String"
+        },
+        "FirstLambdaRole":{
+            "Type": "String"
+        },
+        "SecondLambdaRole": {
+            "Type": "String"
+        },
+        "SecondLambdaLayerName":{
+            "Type": "String"
+        },
+        "SecondLambdaS3Key": {
+            "Type": "String"
+        },
+        "FirstLambdaMSKTrigger":{
+            "Type": "String"
+        },
+        "LogstashSecurityGroupId": {  
+            "Type": "String"
+        },
+        "LogstashSubnetId": {  
+            "Type": "String"
+        },
+        "LogstashAmiId": {
+            "Type": "String" 
+        },
+        "OpenSearchSecurityGroupId": {
+            "Type": "String"
+        },
+        "OpenSearchIamRoleName": {
+            "Type": "String"
+        },
+        "OpenSearchSubnetIds": {
+            "Type": "List<String>"
+        },
+        "GrafanaSecurityGroupId": {
+            "Type": "String"
+        },
+        "GrafanaSubnetId": {
+            "Type": "String"
+        },
+        "GrafanaAmiId": {
+            "Type": "String"
+        },
+        "CreateResources": {
+            "Type": "String",
+            "Default": "No",
+            "AllowedValues": ["Yes", "No"],
+            "Description": "Specify whether to create resources"
+        }
+    },
+    "Conditions": {
+        "ShouldCreateResources": {
+            "Fn::Equals": [
+                { "Ref": "CreateResources" },
+                "Yes"
+            ]
+        }
+    },
+    "Resources": {
+        "LambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": "msk-vcu-parser-test-GT",
+                "Role":{
+                    "Fn::Sub": [
+                        "arn:aws:iam::${AWS::AccountId}:role/${FirstLambdaRole}"
+                    ]
+                },
+                "Code": {
+                    "S3Bucket": { "Ref": "CodeS3Bucket" }, 
+                    "S3Key": { "Ref": "FirstLambdaS3Key" }    
+                },
+                "Handler": "hello.handler",
+                "Runtime": "provided.al2",
+                "Architectures": ["arm64"],
+                "VpcConfig": {
+                    "SecurityGroupIds": [
+                        {
+                            "Ref": "VpcSecurityGroupId"
+                        }
+                    ],
+                    "SubnetIds": [
+                        {
+                        "Ref": "SubnetIds"
+                        }
+                    ]
+                },
+                "Timeout": 10
+            }
+        },
+        "LambdaMSKTrigger": {
+            "Type": "AWS::Lambda::EventSourceMapping",
+            "Properties": {
+                "EventSourceArn": {
+                    "Ref": "FirstLambdaMSKTrigger"
+                },
+                "FunctionName": {
+                    "Ref": "LambdaFunction"
+                },
+                "BatchSize": 500,
+                "Enabled": false
+            }
+        },
+        "LambdaIoTTrigger": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "FunctionName": {
+                    "Ref": "LambdaFunction"
+                },
+                "Action": "lambda:InvokeFunction",
+                "Principal": "iot.amazonaws.com",
+                "SourceArn": {
+                    "Fn::Sub": [
+                        "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:rule/vcu_input_v1"
+                    ]
+                }
+            }
+        },
+        "SNSTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "TopicName": "msk-publisher-GT",
+                "Subscription": [
+                    {
+                        "Endpoint": {
+                            "Fn::GetAtt": ["SecondLambdaFunction", "Arn"]
+                        },
+                        "Protocol": "lambda"
+                    }
+                ],
+                "DisplayName": "msk-publisher-vcu"
+            }
+        },
+        "SecondLambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": "UV-msk-vcu-producer-GT",
+                "Role": {
+                    "Fn::Sub": [
+                        "arn:aws:iam::${AWS::AccountId}:role/${SecondLambdaRole}"
+                    ]
+                },
+                "Code": {
+                    "S3Bucket": { "Ref": "CodeS3Bucket" }, 
+                    "S3Key": { "Ref": "SecondLambdaS3Key" }    
+                },
+                "Handler": "lambda_function.lambda_handler",
+                "Runtime": "python3.8",
+                "Layers": [
+                    {
+                        "Fn::Sub" : [
+                            "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:${SecondLambdaLayerName}"
+                        ]
+                    }
+                ],
+                "VpcConfig": {
+                    "SecurityGroupIds": [
+                        {
+                            "Ref": "VpcSecurityGroupId"
+                        }
+                    ],
+                    "SubnetIds": [
+                        {
+                        "Ref": "SubnetIds"
+                        }
+                    ]
+                },
+                "Timeout": 3
+            }
+        },
+        "SecondLambdaSNSTrigger": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "FunctionName": {
+                    "Ref": "SecondLambdaFunction"
+                },
+                "Action": "lambda:InvokeFunction",
+                "Principal": "sns.amazonaws.com",
+                "SourceArn": {
+                    "Ref": "SNSTopic"
+                }
+            }
+        },
+        "LogstashEC2Instance": {  
+            "Type": "AWS::EC2::Instance",
+            "Condition": "ShouldCreateResources",
+            "Properties": {
+                "InstanceType": "c5.xlarge",  
+                "KeyName": "uv-msk-topic-instance-GT",  
+                "ImageId": {
+                    "Ref": "LogstashAmiId"
+                },  
+                "SubnetId": {
+                    "Ref": "LogstashSubnetId" 
+                }, 
+                "SecurityGroupIds": [
+                    {
+                        "Ref": "LogstashSecurityGroupId"  
+                    }
+                ],
+                "EbsOptimized": true,
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/sda1",
+                        "Ebs": {
+                            "DeleteOnTermination": true,
+                            "VolumeSize": 100
+                        }
+                    }
+                ],
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "UV_logstash8.6.1-GT"  
+                    }
+                ]
+            }
+        },
+        "OpenSearchDomain": {
+            "Type": "AWS::OpenSearchService::Domain",
+            "Condition": "ShouldCreateResources",
+            "Properties": {
+                "DomainName": "uv-opensearch-GT",
+                "EngineVersion": "OpenSearch_2.5",
+                "ClusterConfig": {
+                    "InstanceType": "r6g.large.search",
+                    "InstanceCount": 2,
+                    "DedicatedMasterEnabled": true,
+                    "DedicatedMasterType": "m6g.large.search",
+                    "DedicatedMasterCount": 3
+                },
+                "EBSOptions": {
+                    "EBSEnabled": true,
+                    "VolumeType": "gp3",
+                    "VolumeSize": 1750,
+                    "Iops": 5250,
+                    "Throughput": 250
+                },
+                "EncryptionAtRestOptions": {
+                    "Enabled": true,
+                    "KmsKeyId": "e909cb1f-bc38-491a-a658-ace5a399d5a0"
+                },
+                "NodeToNodeEncryptionOptions": {
+                    "Enabled": true
+                },
+                "AdvancedOptions": {
+                    "rest.action.multi.allow_explicit_index": "true",
+                    "indices.fielddata.cache.size": "20",
+                    "indices.query.bool.max_clause_count": "1024"
+                },
+                "DomainEndpointOptions": {
+                    "EnforceHTTPS": true
+                },
+                "VpcOptions": {
+                    "SecurityGroupIds": [
+                        {
+                            "Ref": "OpenSearchSecurityGroupId"
+                        }
+                    ],
+                    "SubnetIds": [
+                        {
+                        "Ref": "OpenSearchSubnetIds"
+                        }
+                    ]
+                },
+                "SnapshotOptions": {
+                    "AutomatedSnapshotStartHour": 0
+                },
+                "AccessPolicies": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": {
+                                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/${OpenSearchIamRoleName}"
+                                }
+                            },
+                            "Action": "es:*",
+                            "Resource": {
+                                "Fn::Sub": "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/uv-opensearch/*"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        "GrafanaEC2Instance": {
+            "Type": "AWS::EC2::Instance",
+            "Condition": "ShouldCreateResources",
+            "Properties": {
+                "InstanceType": "t3.medium",  
+                "KeyName": "ultraviolette-grafana-keypair-GT",  
+                "ImageId": {
+                    "Ref": "GrafanaAmiId"
+                },   
+                "SubnetId": {
+                    "Ref": "GrafanaSubnetId" 
+                },
+                "SecurityGroupIds": [
+                    {
+                        "Ref": "GrafanaSecurityGroupId"  
+                    }
+                ],
+                "EbsOptimized": true,
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/xvda",
+                        "Ebs": {
+                            "DeleteOnTermination": true,
+                            "VolumeSize": 30
+                        }
+                    }
+                ],
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Ultraviolette-Grafana-GT"
+                    }
+                ]
+            }
+        }
+    },
+    "Outputs": {
+        "LambdaFunctionArn": { 
+            "Value": {
+                "Fn::GetAtt": ["LambdaFunction", "Arn"]
+            }
+        },
+        "SecondLambdaFunctionArn": {
+            "Value": {
+                "Fn::GetAtt": ["SecondLambdaFunction", "Arn"]
+            }
+        },
+        "LogstashEC2InstanceId": {  
+            "Value": {
+                "Ref": "LogstashEC2Instance"
+            }
+        },
+        "OpenSearchDomainEndpoint": {
+            "Value": {
+                "Fn::GetAtt": ["OpenSearchCluster", "DomainEndpoint"]
+            }
+        },
+        "GrafanaEC2InstanceId": {
+            "Value": {
+                "Ref": "GrafanaEC2Instance"
+            }
+        }
+    }
+}
