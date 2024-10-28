@@ -1,0 +1,145 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "CloudFormation template for Grafana Pipeline",
+    "Parameters": {
+        "VpcSecurityGroupId": {
+            "Type": "String"  
+        },
+        "SubnetIds": {
+            "Type": "List<String>"
+        },
+        "CodeS3Bucket": {
+            "Type": "String"
+        },
+        "FirstLambdaS3Key": {
+            "Type": "String"
+        },
+        "SecondLambdaS3Key": {
+            "Type": "String"
+        },
+        "FirstLambdaRole":{
+            "Type": "String"
+        },
+        "SecondLambdaRole": {
+            "Type": "String"
+        },
+        "SecondLambdaLayerName":{
+            "Type": "String"
+        }
+    },
+    "Resources": {
+        "LambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": "msk-vcu-parser-test-GT",
+                "Role":{
+                    "Fn::Sub": [
+                        "arn:aws:iam::${AWS::AccountId}:role/${FirstLambdaRole}"
+                    ]
+                },
+                "Code": {
+                    "S3Bucket": { "Ref": "CodeS3Bucket" }, 
+                    "S3Key": { "Ref": "FirstLambdaS3Key" }    
+                },
+                "Handler": "hello.handler",
+                "Runtime": "provided.al2",
+                "Architectures": ["arm64"],
+                "VpcConfig": {
+                    "SecurityGroupIds": [
+                        {
+                            "Ref": "VpcSecurityGroupId"
+                        }
+                    ],
+                    "SubnetIds": [
+                        {
+                        "Ref": "SubnetIds"
+                        }
+                    ]
+                },
+                "Timeout": 10
+            }
+        },
+        "SNSTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "TopicName": "msk-publisher-GT",
+                "Subscription": [
+                    {
+                        "Endpoint": {
+                            "Fn::GetAtt": ["SecondLambdaFunction", "Arn"]
+                        },
+                        "Protocol": "lambda"
+                    }
+                ],
+                "DisplayName": "msk-publisher-vcu"
+            }
+        },
+        "SecondLambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": "UV-msk-vcu-producer-GT",
+                "Role": {
+                    "Fn::Sub": [
+                        "arn:aws:iam::${AWS::AccountId}:role/${SecondLambdaRole}"
+                    ]
+                },
+                "Code": {
+                    "S3Bucket": { "Ref": "CodeS3Bucket" }, 
+                    "S3Key": { "Ref": "SecondLambdaS3Key" }    
+                },
+                "Handler": "lambda_function.lambda_handler",
+                "Runtime": "python3.8",
+                "Layers": [
+                    {
+                        "Fn::Sub" : [
+                            "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:${SecondLambdaLayerName}"
+                        ]
+                    }
+                ],
+                "VpcConfig": {
+                    "SecurityGroupIds": [
+                        {
+                            "Ref": "VpcSecurityGroupId"
+                        }
+                    ],
+                    "SubnetIds": [
+                        {
+                        "Ref": "SubnetIds"
+                        }
+                    ]
+                },
+                "Timeout": 3
+            }
+        },
+        "SecondLambdaSNSTrigger": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "FunctionName": {
+                    "Ref": "SecondLambdaFunction"
+                },
+                "Action": "lambda:InvokeFunction",
+                "Principal": "sns.amazonaws.com",
+                "SourceArn": {
+                    "Ref": "SNSTopic"
+                }
+            }
+        }
+    },
+    "Outputs": {
+        "LambdaFunctionArn": { 
+            "Value": {
+                "Fn::GetAtt": ["LambdaFunction", "Arn"]
+            }
+        },
+        "SecondLambdaFunctionArn": {
+            "Value": {
+                "Fn::GetAtt": ["SecondLambdaFunction", "Arn"]
+            }
+        },
+        "SNSTopicArn": {
+            "Value": {
+                "Fn::GetAtt": ["SNSTopic", "TopicArn"]
+            }
+        }
+    }
+}
